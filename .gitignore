@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Virtual environment
+.venv/
+
+# Local configuration and secrets
+.env
+
+# Django
+db.sqlite3
+/cache/
+
+# Source data files (downloaded/copied locally, never committed)
+/data/*
+!/data/README.md
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
