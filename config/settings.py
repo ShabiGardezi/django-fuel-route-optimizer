@@ -10,6 +10,7 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/6.1/ref/settings/
 """
 
+import math
 import os
 from pathlib import Path
 
@@ -19,15 +20,44 @@ from django.core.exceptions import ImproperlyConfigured
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
+def _parse_dotenv_line(line):
+    """Return (key, value) for a ``KEY=VALUE`` line, or None for blank, comment and malformed lines.
+
+    Deliberately small: an optional leading ``export ``, and one pair of matching surrounding
+    single or double quotes is removed. No escapes, interpolation or inline comments.
+    """
+    line = line.strip()
+    if line.startswith('export '):
+        line = line[len('export '):].lstrip()
+    if not line or line.startswith('#') or '=' not in line:
+        return None
+    key, value = (part.strip() for part in line.split('=', 1))
+    if not key or any(ch.isspace() for ch in key):
+        return None
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in '"\'':
+        value = value[1:-1]
+    return key, value
+
+
 def _load_dotenv(path):
     """Load KEY=VALUE lines from a local .env file without overriding the real environment."""
     if not path.exists():
         return
     for line in path.read_text().splitlines():
-        line = line.strip()
-        if line and not line.startswith('#') and '=' in line:
-            key, value = line.split('=', 1)
-            os.environ.setdefault(key.strip(), value.strip())
+        parsed = _parse_dotenv_line(line)
+        if parsed:
+            os.environ.setdefault(*parsed)
+
+
+def _corridor_miles(raw):
+    """Parse FUEL_CORRIDOR_MILES: a finite number of miles greater than zero."""
+    try:
+        miles = float(raw)
+    except (TypeError, ValueError):
+        miles = None
+    if miles is None or not math.isfinite(miles) or miles <= 0:
+        raise ImproperlyConfigured(f'FUEL_CORRIDOR_MILES must be a number of miles greater than 0, got {raw!r}.')
+    return miles
 
 
 _load_dotenv(BASE_DIR / '.env')
@@ -167,7 +197,7 @@ REST_FRAMEWORK = {
 
 # Application settings
 ORS_API_KEY = os.environ.get('ORS_API_KEY', '')
-FUEL_CORRIDOR_MILES = float(os.environ.get('FUEL_CORRIDOR_MILES', '10'))
+FUEL_CORRIDOR_MILES = _corridor_miles(os.environ.get('FUEL_CORRIDOR_MILES', '10'))
 
 
 # Email

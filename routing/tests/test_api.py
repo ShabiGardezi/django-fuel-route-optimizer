@@ -110,9 +110,9 @@ class APITestCase(TestCase):
         station(104, 500, '2.00000000', 40, lat=LAT + 3)  # cheap but ~200 miles off the route
         station(105, 400, '1.00000000', 50, lat=None)  # never located
 
-    def post(self, body, raw=False, **kwargs):
+    def post(self, body, raw=False, url=URL, **kwargs):
         data = body if raw else json.dumps(body)
-        response = self.client.post(URL, data=data, content_type=kwargs.pop('content_type', 'application/json'), **kwargs)
+        response = self.client.post(url, data=data, content_type=kwargs.pop('content_type', 'application/json'), **kwargs)
         return response, json.loads(response.content, parse_float=Decimal)
 
     def assert_error(self, response, payload, http_status, code):
@@ -324,3 +324,47 @@ class ProviderErrorTests(APITestCase):
             response, payload = self.post({'start': 'Westville, KS', 'finish': 'Eastville, OH'})
         self.assert_error(response, payload, 500, 'internal_error')
         self.assertNotIn('boom', response.content.decode())
+
+    def test_geocoder_http_400_is_a_provider_fault(self):
+        # Inputs Pelias would reject (blank, too long) are refused locally before any call, so a geocoder 400
+        # means the request this service built was rejected: a 502, with Pelias' message kept out of the response.
+        pelias_detail = "invalid param 'boundary.country': must be a valid ISO 3166-1 alpha-3 code"
+        self.fake.overrides = {'Westville, KS': FakeResponse(400, {'geocoding': {'errors': [pelias_detail]}})}
+        with self.assertLogs('routing.views', level='WARNING') as logs:
+            response, payload = self.post({'start': 'Westville, KS', 'finish': 'Eastville, OH'})
+        error = self.assert_error(response, payload, 502, 'provider_bad_response')
+        self.assertIn(pelias_detail, ''.join(logs.output))
+        self.assertNotIn('boundary.country', response.content.decode())
+        self.assertNotIn(ors.GEOCODE_URL, response.content.decode())
+        self.assertEqual(self.fake.calls, [('GET', ors.GEOCODE_URL)])  # stopped before routing
+        self.assertNotIn('field', error['details'] or {})  # not attributed to the user's start/finish
+
+
+class URLTests(APITestCase):
+    BODY = {'start': 'Westville, KS', 'finish': 'Eastville, OH'}
+
+    def test_both_forms_resolve_to_the_same_view(self):
+        from django.urls import resolve, reverse
+        self.assertIs(resolve('/api/route').func, resolve('/api/route/').func)
+        self.assertEqual(reverse('route'), '/api/route/')  # the documented form stays canonical
+
+    def test_post_without_trailing_slash_is_served_directly(self):
+        with_slash, expected = self.post(self.BODY)
+        self.assertEqual(with_slash.status_code, 200)
+        for debug in (True, False):
+            with self.subTest(debug=debug), override_settings(DEBUG=debug):
+                response, payload = self.post(self.BODY, url='/api/route')
+                self.assertEqual(response.status_code, 200)
+                self.assertNotIn('Location', response)
+                self.assertEqual(payload, expected)
+
+    def test_validation_and_errors_are_unchanged_without_trailing_slash(self):
+        for url in ('/api/route/', '/api/route'):
+            with self.subTest(url=url):
+                response, payload = self.post({'start': '', 'finish': 'Eastville, OH'}, url=url)
+                self.assertEqual(self.assert_error(response, payload, 400, 'invalid_request')['details']['fields'].keys(), {'start'})
+                response, payload = self.post('start=Westville', raw=True, url=url, content_type='application/x-www-form-urlencoded')
+                self.assert_error(response, payload, 415, 'unsupported_media_type')
+                response = self.client.get(url)
+                self.assert_error(response, json.loads(response.content), 405, 'method_not_allowed')
+        self.assertEqual(self.fake.calls, [])

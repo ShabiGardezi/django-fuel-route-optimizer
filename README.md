@@ -9,6 +9,11 @@ A Django REST API that takes a start and finish location in the USA and returns:
 The vehicle has a 50-gallon tank, drives 10 miles per gallon (a 500-mile range), and starts with a full tank.
 Fuel prices come from the supplied `fuel-prices-for-be-assessment.csv`.
 
+> **Read this first: how results should be interpreted**
+> - **Cost counts fuel bought during the trip.** The initial 50-gallon tank is assumed full and free, so `total_cost_usd` is the cost of fuel *purchased along the route*, not the cost of all fuel consumed. For example, a 1,000-mile trip consumes 100 gallons but buys only about 50.
+> - **Station locations are approximate.** They are Census place or subdivision points for each station's city or town, used as stand-ins. They are not verified fuel-station coordinates.
+> - **"Optimal" means optimal within the model.** Stops and costs minimise fuel expenditure under the documented model (section 5). That is not a guarantee of the cheapest real-world trip.
+
 **Stack:** Python 3.12, Django 6.1.2, Django REST Framework 3.18.3, `requests`, SQLite.
 **External services:** OpenRouteService on `api.heigit.org` — geocoding (Pelias) and driving directions.
 Fuel stations are **not** geocoded through the API; they are located once, offline, from US Census Gazetteer files.
@@ -34,6 +39,8 @@ Load the fuel data (section 3), then start the server:
 python manage.py runserver    # http://127.0.0.1:8000/api/route/
 ```
 
+These settings are for local development. `python manage.py check --deploy` reports the usual production-hardening items: HSTS, SSL redirect, secure cookies, and the console email backend from the project template.
+
 ### Environment variables
 
 `config/settings.py` reads these from the environment, and also from a `.env` file in the project root.
@@ -45,7 +52,9 @@ Real environment variables take precedence over `.env`.
 | `DJANGO_DEBUG` | no | `true` for local development. Any other value, or unset, means debug is off. |
 | `DJANGO_SECRET_KEY` | when debug is off | Required when `DJANGO_DEBUG` is not `true`; startup fails without it. With `DJANGO_DEBUG=true` a development-only key is used if it is blank. |
 | `DJANGO_ALLOWED_HOSTS` | no | Comma-separated host names. Default: `localhost,127.0.0.1`. |
-| `FUEL_CORRIDOR_MILES` | no | How close (in miles) a station's approximate location must be to the route. Default: `10`. |
+| `FUEL_CORRIDOR_MILES` | no | How close (in miles) a station's approximate location must be to the route. Default: `10`. Must be a number greater than 0; otherwise Django refuses to start with `ImproperlyConfigured`. |
+
+**`.env` format:** one `KEY=value` per line. Blank lines and lines starting with `#` are ignored. A leading `export ` is allowed, and one pair of matching single or double quotes around a value is removed. Inline comments, escapes and variable expansion are **not** supported: put comments on their own line.
 
 `.env.example` contains the intended local-development values with an empty key.
 
@@ -84,11 +93,14 @@ Everything in `data/` except `data/README.md` is ignored by Git. Put three files
 ```bash
 cp /path/to/fuel-prices-for-be-assessment.csv data/
 
-curl -LO https://www2.census.gov/geo/docs/maps-data/data/gazetteer/2026_Gazetteer/2026_Gaz_place_national.zip
-curl -LO https://www2.census.gov/geo/docs/maps-data/data/gazetteer/2026_Gazetteer/2026_Gaz_cousubs_national.zip
-unzip 2026_Gaz_place_national.zip -d data/
-unzip 2026_Gaz_cousubs_national.zip -d data/
+# Download into data/ (git-ignored), never the repository root
+curl -L -o data/2026_Gaz_place_national.zip https://www2.census.gov/geo/docs/maps-data/data/gazetteer/2026_Gazetteer/2026_Gaz_place_national.zip
+curl -L -o data/2026_Gaz_cousubs_national.zip https://www2.census.gov/geo/docs/maps-data/data/gazetteer/2026_Gazetteer/2026_Gaz_cousubs_national.zip
+unzip -o data/2026_Gaz_place_national.zip -d data/
+unzip -o data/2026_Gaz_cousubs_national.zip -d data/
 ```
+
+This should produce `data/2026_Gaz_place_national.txt` and `data/2026_Gaz_cousubs_national.txt`, which are the importer's default `--gazetteer` path and the `--cousub` path used below. The zips can then be deleted.
 
 The CSV is supplied with the assessment. The two Gazetteer files are the official US Census 2026 Places and County Subdivisions files.
 
@@ -145,6 +157,8 @@ Content-Type: application/json
 
 {"start": "New York, NY", "finish": "Boston, MA"}
 ```
+
+**Trailing slash:** `/api/route/` is the documented form. `/api/route` (no slash) is routed to the same view and served directly, with no redirect, so a POST to either works the same.
 
 **Request rules**
 - `start` and `finish` are required, non-blank strings of at most 200 characters.
@@ -272,7 +286,7 @@ Every error has the same shape:
 | 422 | `no_feasible_fuel_plan` | A route exists, but no sequence of candidate stations keeps every gap within 500 miles. `details` gives the gap and the corridor. |
 | 500 | `server_misconfigured` | `ORS_API_KEY` is not set |
 | 500 | `internal_error` | Unexpected error (logged; no details returned) |
-| 502 | `provider_auth_error` / `provider_bad_response` / `provider_error` | ORS rejected the credentials, or returned an unusable response |
+| 502 | `provider_auth_error` / `provider_bad_response` / `provider_error` | ORS rejected the credentials, returned an unusable response, or rejected the request this service built (for example, a geocoder HTTP 400: user input that Pelias would reject is already refused locally with a 400) |
 | 503 | `provider_rate_limited` | ORS rate limit (429) or confirmed daily quota (403 "Quota exceeded"); `details.quota_exhausted` |
 | 503 | `provider_unavailable` | Connection failure or ORS 5xx |
 | 504 | `provider_timeout` | ORS timed out (5 s connect, 30 s read) |
@@ -352,10 +366,11 @@ The plan is **not** a claim about the cheapest real-world trip.
 - **No detour cost:** fuel used to leave the route and reach a station isn't counted. Plans also arrive with exactly the fuel needed, with no reserve.
 
 **Provider and caching**
-- **Provider dependency:** geocoding and routing need OpenRouteService on `api.heigit.org` and a valid key, with daily quotas. Geocoding accepts a place only if the top result is a city-level or finer place in the USA. Unclear names such as "Springfield" are rejected and must include a state.
+- **Provider dependency:** geocoding and routing need OpenRouteService on `api.heigit.org` and a valid key, with daily quotas. Geocoding accepts a place only if the top result is a city-level or finer place in the USA. A name shared by several places, such as "Springfield", may be rejected as ambiguous, depending on the geocoder's ranking. Adding a state avoids that.
 - **Cache:** the file-based cache is local to one machine; delete `cache/django/` to clear it.
 - **Live verification:** only the success path has been verified against the real service; see [OpenRouteService integration verification](#openrouteservice-integration-verification) below.
-- **Response size:** long routes return the full ORS geometry, which can be large (around 1 MB of JSON coast to coast).
+- **Response size:** the full ORS geometry is returned. Observed: the live Chicago → Denver response was 119 KB for 1,000.4 miles (5,048 points), roughly 119 KB per 1,000 miles. This is one measurement, not a guarantee; size depends on how many points ORS returns.
+- **Public endpoint, no throttling:** the API has no authentication or rate limiting, which is fine for a local assessment. If deployed publicly, anyone could use up the shared ORS daily quota. Caching only helps for repeated identical trips, and a per-IP throttle alone wouldn't prevent distributed use. A deployment should add authentication or an API gateway quota.
 
 ### OpenRouteService integration verification
 
@@ -377,19 +392,20 @@ Station coordinates are approximate Census Gazetteer locations, not verified pum
 All tests use Django's test runner. Every provider call is mocked, and live HTTP is blocked inside the tests.
 
 ```bash
-python manage.py test routing               # 91 tests
+python manage.py test routing               # 103 tests
 python manage.py check
 python manage.py makemigrations --check --dry-run
 ```
 
-`pytest` and `pytest-django` are pinned in `requirements.txt` but not configured; the suite is run with `manage.py test`.
+No extra test packages are needed; the suite runs on Django's built-in runner.
 
 **What the tests cover**
 - **Import:** validation, transaction rollback, County Subdivisions matching rules.
 - **Geometry:** projection, corridor visits, the V-shape, loops and tangent cases, the prefilter against a brute-force reference, and approximation error against a great-circle oracle.
 - **Optimizer:** the reference-solver comparisons described in section 5, invariants, boundary cases and `Decimal` rounding.
 - **ORS client:** request format, validation, caching, and error and quota mapping.
-- **API:** schema, `Decimal` strings, every error mapping, and cache reuse.
+- **API:** schema, `Decimal` strings, every error mapping (including a geocoder HTTP 400), cache reuse, and both URL forms.
+- **Settings:** `FUEL_CORRIDOR_MILES` validation (including a startup check in a subprocess) and `.env` parsing.
 
 ### Benchmark (synthetic only)
 

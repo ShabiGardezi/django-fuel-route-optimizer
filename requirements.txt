@@ -1,21 +1,14 @@
 # Verified against PyPI JSON metadata and official release notes (2026-10-14).
 # Python 3.12.8
+# Tests use Django's built-in runner (python manage.py test routing); no extra test packages are needed.
 Django==6.1.2
 djangorestframework==3.18.3
 requests==2.34.2
-
-# Testing
-pytest==9.1.1
-pytest-django==4.14.0
 
 # Transitive dependencies (from pip freeze)
 asgiref==3.12.1
 certifi==2026.7.22
 charset-normalizer==3.5.2
 idna==3.20
-iniconfig==2.3.1
-packaging==26.3
-pluggy==1.6.0
-Pygments==2.21.0
 sqlparse==0.6.0
 urllib3==2.8.0
